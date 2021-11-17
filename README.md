@@ -1,3 +1,6 @@
+This is my attempt to upgrade to CUDA 11.4  work in progress (Incomplete)
+
+
 # ethminer
 
 [![standard-readme compliant](https://img.shields.io/badge/readme%20style-standard-brightgreen.svg)](https://github.com/RichardLitt/standard-readme)
