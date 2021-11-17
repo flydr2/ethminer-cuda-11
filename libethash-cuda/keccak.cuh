@@ -1,27 +1,65 @@
 #include "cuda_helper.h"
 
-__device__ __constant__ uint64_t const keccak_round_constants[24] = {0x0000000000000001ULL,
-    0x0000000000008082ULL, 0x800000000000808AULL, 0x8000000080008000ULL, 0x000000000000808BULL,
-    0x0000000080000001ULL, 0x8000000080008081ULL, 0x8000000000008009ULL, 0x000000000000008AULL,
-    0x0000000000000088ULL, 0x0000000080008009ULL, 0x000000008000000AULL, 0x000000008000808BULL,
-    0x800000000000008BULL, 0x8000000000008089ULL, 0x8000000000008003ULL, 0x8000000000008002ULL,
-    0x8000000000000080ULL, 0x000000000000800AULL, 0x800000008000000AULL, 0x8000000080008081ULL,
-    0x8000000000008080ULL, 0x0000000080000001ULL, 0x8000000080008008ULL};
+__device__ __constant__ uint2 const keccak_round_constants[24] = {
+    { 0x00000001, 0x00000000 }, { 0x00008082, 0x00000000 }, { 0x0000808a, 0x80000000 }, { 0x80008000, 0x80000000 },
+    { 0x0000808b, 0x00000000 }, { 0x80000001, 0x00000000 }, { 0x80008081, 0x80000000 }, { 0x00008009, 0x80000000 },
+    { 0x0000008a, 0x00000000 }, { 0x00000088, 0x00000000 }, { 0x80008009, 0x00000000 }, { 0x8000000a, 0x00000000 },
+    { 0x8000808b, 0x00000000 }, { 0x0000008b, 0x80000000 }, { 0x00008089, 0x80000000 }, { 0x00008003, 0x80000000 },
+    { 0x00008002, 0x80000000 }, { 0x00000080, 0x80000000 }, { 0x0000800a, 0x00000000 }, { 0x8000000a, 0x80000000 },
+    { 0x80008081, 0x80000000 }, { 0x00008080, 0x80000000 }, { 0x80000001, 0x00000000 }, { 0x80008008, 0x80000000 }
+};
 
 DEV_INLINE uint2 xor5(
     const uint2 a, const uint2 b, const uint2 c, const uint2 d, const uint2 e)
 {
+#if __CUDA_ARCH__ >= 500 && CUDA_VERSION >= 7050
+    uint2 result;
+    asm volatile (
+        "// xor5\n\t"
+        "lop3.b32 %0, %2, %3, %4, 0x96;\n\t"
+        "lop3.b32 %0, %0, %5, %6, 0x96;\n\t"
+        "lop3.b32 %1, %7, %8, %9, 0x96;\n\t"
+        "lop3.b32 %1, %1, %10, %11, 0x96;"
+        : "=r"(result.x), "=r"(result.y)
+        : "r"(a.x), "r"(b.x), "r"(c.x),"r"(d.x),"r"(e.x),
+          "r"(a.y), "r"(b.y), "r"(c.y),"r"(d.y),"r"(e.y));
+    return result;
+#else
     return a ^ b ^ c ^ d ^ e;
+#endif
 }
 
 DEV_INLINE uint2 xor3(const uint2 a, const uint2 b, const uint2 c)
 {
+#if __CUDA_ARCH__ >= 500 && CUDA_VERSION >= 7050
+    uint2 result;
+    asm volatile (
+        "// xor3\n\t"
+        "lop3.b32 %0, %2, %3, %4, 0x96;\n\t"
+        "lop3.b32 %1, %5, %6, %7, 0x96;"
+        : "=r"(result.x), "=r"(result.y)
+        : "r"(a.x), "r"(b.x), "r"(c.x), "r"(a.y), "r"(b.y), "r"(c.y));
+    return result;
+#else
     return a ^ b ^ c;
+#endif
 }
 
 DEV_INLINE uint2 chi(const uint2 a, const uint2 b, const uint2 c)
 {
+#if __CUDA_ARCH__ >= 500 && CUDA_VERSION >= 7050
+    uint2 result;
+    asm volatile (
+        "// chi\n\t"
+        "lop3.b32 %0, %2, %3, %4, 0xD2;\n\t"
+        "lop3.b32 %1, %5, %6, %7, 0xD2;"
+        : "=r"(result.x), "=r"(result.y)
+        : "r"(a.x), "r"(b.x), "r"(c.x),  // 0xD2 = 0xF0 ^ ((~0xCC) & 0xAA)
+          "r"(a.y), "r"(b.y), "r"(c.y)); // 0xD2 = 0xF0 ^ ((~0xCC) & 0xAA)
+    return result;
+#else
     return a ^ (~b) & c;
+#endif
 }
 
 DEV_INLINE void keccak_f1600_init(uint2* state)
@@ -98,8 +136,8 @@ DEV_INLINE void keccak_f1600_init(uint2* state)
     s[20] = ROL2(s[2], 62);
     s[2] = ROL2(s[12], 43);
     s[12] = ROL2(s[13], 25);
-    s[13] = ROL2(s[19], 8);
-    s[19] = ROL2(s[23], 56);
+    s[13] = ROL8(s[19]);
+    s[19] = ROR8(s[23]);
     s[23] = ROL2(s[15], 41);
     s[15] = ROL2(s[4], 27);
     s[4] = ROL2(s[24], 14);
@@ -158,7 +196,7 @@ DEV_INLINE void keccak_f1600_init(uint2* state)
     s[24] = chi(s[24], u, v);
 
     /* iota: a[0,0] ^= round constant */
-    s[0] ^= vectorize(keccak_round_constants[0]);
+    s[0] ^= keccak_round_constants[0];
 
     for (int i = 1; i < 23; i++)
     {
@@ -218,8 +256,8 @@ DEV_INLINE void keccak_f1600_init(uint2* state)
         s[20] = ROL2(s[2], 62);
         s[2] = ROL2(s[12], 43);
         s[12] = ROL2(s[13], 25);
-        s[13] = ROL2(s[19], 8);
-        s[19] = ROL2(s[23], 56);
+        s[13] = ROL8(s[19]);
+        s[19] = ROR8(s[23]);
         s[23] = ROL2(s[15], 41);
         s[15] = ROL2(s[4], 27);
         s[4] = ROL2(s[24], 14);
@@ -278,7 +316,7 @@ DEV_INLINE void keccak_f1600_init(uint2* state)
         s[24] = chi(s[24], u, v);
 
         /* iota: a[0,0] ^= round constant */
-        s[0] ^= vectorize(keccak_round_constants[i]);
+        s[0] ^= keccak_round_constants[i];
     }
 
     /* theta: c = a[0,i] ^ a[1,i] ^ .. a[4,i] */
@@ -338,7 +376,7 @@ DEV_INLINE void keccak_f1600_init(uint2* state)
     s[7] = chi(s[7], s[8], s[9]);
 
     /* iota: a[0,0] ^= round constant */
-    s[0] ^= vectorize(keccak_round_constants[23]);
+    s[0] ^= keccak_round_constants[23];
 
     for (int i = 0; i < 12; ++i)
         state[i] = s[i];
@@ -417,8 +455,8 @@ DEV_INLINE uint64_t keccak_f1600_final(uint2* state)
     s[20] = ROL2(s[2], 62);
     s[2] = ROL2(s[12], 43);
     s[12] = ROL2(s[13], 25);
-    s[13] = ROL2(s[19], 8);
-    s[19] = ROL2(s[23], 56);
+    s[13] = ROL8(s[19]);
+    s[19] = ROR8(s[23]);
     s[23] = ROL2(s[15], 41);
     s[15] = ROL2(s[4], 27);
     s[4] = ROL2(s[24], 14);
@@ -476,7 +514,7 @@ DEV_INLINE uint64_t keccak_f1600_final(uint2* state)
     s[24] = chi(s[24], u, v);
 
     /* iota: a[0,0] ^= round constant */
-    s[0] ^= vectorize(keccak_round_constants[0]);
+    s[0] ^= keccak_round_constants[0];
 
     for (int i = 1; i < 23; i++)
     {
@@ -536,8 +574,8 @@ DEV_INLINE uint64_t keccak_f1600_final(uint2* state)
         s[20] = ROL2(s[2], 62);
         s[2] = ROL2(s[12], 43);
         s[12] = ROL2(s[13], 25);
-        s[13] = ROL2(s[19], 8);
-        s[19] = ROL2(s[23], 56);
+        s[13] = ROL8(s[19]);
+        s[19] = ROR8(s[23]);
         s[23] = ROL2(s[15], 41);
         s[15] = ROL2(s[4], 27);
         s[4] = ROL2(s[24], 14);
@@ -595,7 +633,7 @@ DEV_INLINE uint64_t keccak_f1600_final(uint2* state)
         s[24] = chi(s[24], u, v);
 
         /* iota: a[0,0] ^= round constant */
-        s[0] ^= vectorize(keccak_round_constants[i]);
+        s[0] ^= keccak_round_constants[i];
     }
 
     t[0] = xor5(s[0], s[5], s[10], s[15], s[20]);
@@ -615,7 +653,7 @@ DEV_INLINE uint64_t keccak_f1600_final(uint2* state)
 
     /* iota: a[0,0] ^= round constant */
     // s[0] ^= vectorize(keccak_round_constants[23]);
-    return devectorize(s[0]) ^ keccak_round_constants[23];
+    return devectorize(s[0] ^ keccak_round_constants[23]);
 }
 
 DEV_INLINE void SHA3_512(uint2* s)
@@ -746,7 +784,7 @@ DEV_INLINE void SHA3_512(uint2* s)
         s[24] = chi(s[24], u, v);
 
         /* iota: a[0,0] ^= round constant */
-        s[0] ^= vectorize(keccak_round_constants[i]);
+        s[0] ^= LDG(keccak_round_constants[i]);
     }
 
     /* theta: c = a[0,i] ^ a[1,i] ^ .. a[4,i] */
@@ -806,5 +844,5 @@ DEV_INLINE void SHA3_512(uint2* s)
     s[7] = chi(s[7], s[8], s[9]);
 
     /* iota: a[0,0] ^= round constant */
-    s[0] ^= vectorize(keccak_round_constants[23]);
+    s[0] ^= LDG(keccak_round_constants[23]);
 }

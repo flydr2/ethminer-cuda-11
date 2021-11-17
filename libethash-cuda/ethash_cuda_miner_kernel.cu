@@ -16,12 +16,11 @@
 
 #include "dagger_shuffled.cuh"
 
-template <uint32_t _PARALLEL_HASH>
 __global__ void ethash_search(volatile Search_results* g_output, uint64_t start_nonce)
 {
     uint32_t const gid = blockIdx.x * blockDim.x + threadIdx.x;
     uint2 mix[4];
-    if (compute_hash<_PARALLEL_HASH>(start_nonce + gid, d_target, mix))
+    if (compute_hash(start_nonce + gid, mix))
         return;
     uint32_t index = atomicInc((uint32_t*)&g_output->count, 0xffffffff);
     if (index >= MAX_SEARCH_RESULTS)
@@ -38,26 +37,9 @@ __global__ void ethash_search(volatile Search_results* g_output, uint64_t start_
 }
 
 void run_ethash_search(uint32_t gridSize, uint32_t blockSize, cudaStream_t stream,
-    volatile Search_results* g_output, uint64_t start_nonce, uint32_t parallelHash)
+    volatile Search_results* g_output, uint64_t start_nonce)
 {
-    switch (parallelHash)
-    {
-    case 1:
-        ethash_search<1><<<gridSize, blockSize, 0, stream>>>(g_output, start_nonce);
-        break;
-    case 2:
-        ethash_search<2><<<gridSize, blockSize, 0, stream>>>(g_output, start_nonce);
-        break;
-    case 4:
-        ethash_search<4><<<gridSize, blockSize, 0, stream>>>(g_output, start_nonce);
-        break;
-    case 8:
-        ethash_search<8><<<gridSize, blockSize, 0, stream>>>(g_output, start_nonce);
-        break;
-    default:
-        ethash_search<4><<<gridSize, blockSize, 0, stream>>>(g_output, start_nonce);
-        break;
-    }
+    ethash_search<<<gridSize, blockSize, 0, stream>>>(g_output, start_nonce);
     CUDA_SAFE_CALL(cudaGetLastError());
 }
 
@@ -71,7 +53,7 @@ __global__ void ethash_calculate_dag_item(uint32_t start)
     if (((node_index >> 1) & (~1)) >= d_dag_size)
         return;
 
-    hash200_t dag_node;
+    hash128_t dag_node;
     copy(dag_node.uint4s, d_light[node_index % d_light_size].uint4s, 4);
     dag_node.words[0] ^= node_index;
     SHA3_512(dag_node.uint2s);
@@ -83,14 +65,12 @@ __global__ void ethash_calculate_dag_item(uint32_t start)
         uint32_t parent_index = fnv(node_index ^ i, dag_node.words[i % NODE_WORDS]) % d_light_size;
         for (uint32_t t = 0; t < 4; t++)
         {
-            uint32_t shuffle_index = SHFL(0xFFFFFFFF, parent_index, t, 4);
+            uint32_t shuffle_index = SHFL(parent_index, t, 4);
 
             uint4 p4 = d_light[shuffle_index].uint4s[thread_id];
             for (int w = 0; w < 4; w++)
             {
-                uint4 s4 = make_uint4(SHFL(0xFFFFFFFF, p4.x, w, 4),
-                    SHFL(0xFFFFFFFF, p4.y, w, 4), SHFL(0xFFFFFFFF, p4.z, w, 4),
-                    SHFL(0xFFFFFFFF, p4.w, w, 4));
+                uint4 s4 = make_uint4(SHFL(p4.x, w, 4), SHFL(p4.y, w, 4), SHFL(p4.z, w, 4), SHFL(p4.w, w, 4));
                 if (t == thread_id)
                 {
                     dag_node.uint4s[w] = fnv4(dag_node.uint4s[w], s4);
@@ -100,23 +80,7 @@ __global__ void ethash_calculate_dag_item(uint32_t start)
     }
     SHA3_512(dag_node.uint2s);
     hash64_t* dag_nodes = (hash64_t*)d_dag;
-
-    for (uint32_t t = 0; t < 4; t++)
-    {
-        uint32_t shuffle_index = SHFL(0xFFFFFFFF, node_index, t, 4);
-        uint4 s[4];
-        for (uint32_t w = 0; w < 4; w++)
-        {
-            s[w] = make_uint4(SHFL(0xFFFFFFFF, dag_node.uint4s[w].x, t, 4),
-                SHFL(0xFFFFFFFF, dag_node.uint4s[w].y, t, 4),
-                SHFL(0xFFFFFFFF, dag_node.uint4s[w].z, t, 4),
-                SHFL(0xFFFFFFFF, dag_node.uint4s[w].w, t, 4));
-        }
-        if (shuffle_index < d_dag_size * 2)
-        {
-            dag_nodes[shuffle_index].uint4s[thread_id] = s[thread_id];
-        }
-    }
+    copy(dag_nodes[node_index].uint4s, dag_node.uint4s, 4);
 }
 
 void ethash_generate_dag(
